@@ -22,6 +22,7 @@ let eventSchema = mongoose.Schema(
     {
         status: {
             type: String,
+            enum: ['up', 'down'],
             required: true
         },
         time: {
@@ -115,12 +116,15 @@ bot.command('add', async (ctx) => {
 
     if (exists) {
         await Service.updateOne({ url: url }, { $addToSet: { userIdList: userId } })
+        if (exists.status == "down") {
+            await ctx.reply(`Your service ${url} is currently down`)
+        }
     }
 
     else {
         let newService = new Service({
             url: url,
-            currentStatus: 'down',
+            currentStatus: "up",
             userIdList: [userId]
         })
 
