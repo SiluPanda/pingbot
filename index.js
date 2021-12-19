@@ -116,7 +116,7 @@ bot.command('add', async (ctx) => {
 
     if (exists) {
         await Service.updateOne({ url: url }, { $addToSet: { userIdList: userId } })
-        if (exists.status == "down") {
+        if (exists.currentStatus == "down") {
             await ctx.reply(`Your service ${url} is currently down`)
         }
     }
