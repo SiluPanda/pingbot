@@ -18,6 +18,19 @@ const dbConnnectionOptions = {
 
 await mongoose.connect(process.env.MONGO_URI, dbConnnectionOptions)
 
+let eventSchema = mongoose.Schema(
+    {
+        status: {
+            type: String,
+            required: true
+        },
+        time: {
+            type: Date,
+            required: true
+        }
+    }
+)
+
 let serviceSchema = mongoose.Schema(
     {
         url: {
@@ -30,8 +43,13 @@ let serviceSchema = mongoose.Schema(
             enum: ['up', 'down'],
             default: 'down'
         },
-        userId: {
-            type: String,
+        eventList: {
+            type: [eventSchema],
+            required: true,
+            default: []
+        },
+        userIdList: {
+            type: [String],
             required: true
         }
     },
@@ -62,6 +80,8 @@ Example: /add https://google.com
 
 /remove <service url> : remove a service already added for monitoring
 Example: /remove https://google.com
+
+/all : see all your monitored services
     `
 
     await ctx.reply(helpMessage)
@@ -87,19 +107,27 @@ bot.command('add', async (ctx) => {
         return
     }
 
-    let exists = await Service.findOne({ userId: userId, url: url })
-    if (exists) {
+    let exists = await Service.findOne({ url: url })
+    if (exists && exists.userIdList && exists.userIdList.includes(userId)) {
         await ctx.reply("Hmm..looks like this is already being monitored by you")
         return
     }
 
-    let newService = new Service({
-        url: url,
-        currentStatus: 'down',
-        userId: userId
-    })
+    if (exists) {
+        await Service.updateOne({ url: url }, { $addToSet: { userIdList: userId } })
+    }
 
-    await newService.save()
+    else {
+        let newService = new Service({
+            url: url,
+            currentStatus: 'down',
+            userIdList: [userId]
+        })
+
+        await newService.save()
+    }
+
+    
     await ctx.reply(`Your service is added to monitor, 
 It will be pinged every 10 seconds, When there is a change in status, you will be notified`)
 
@@ -116,12 +144,21 @@ bot.command('remove', async (ctx) => {
     }
 
     let url = tokens[1].trim().toLowerCase()
-    let deleteIfExists = await Service.findOneAndDelete({ userId: userId, url: url })
 
-    if (!deleteIfExists) {
+    if (!url.startsWith('https://') && !url.startsWith('http://')) {
+        url = 'http://' + url
+    }
+
+    console.log(url)
+
+    let exists = await Service.findOne({ url: url })
+
+    if (!exists || (exists.userIdList && !exists.userIdList.includes(userId))) {
         await ctx.reply(`Hmm...the specified service does not seem to be currently monitored`)
         return
     }
+
+    await Service.updateOne({ url: url }, { $pull: { userIdList: userId }})
 
     await ctx.reply(`Your service is removed from the monitor, You will no longer recieve any updates for this service`)
 
@@ -129,14 +166,24 @@ bot.command('remove', async (ctx) => {
 
 bot.command('all', async (ctx) => {
     let userId = ctx.msg.chat.id
-    let allServicesOfUser = await Service.find({ userId: userId }).exec()
+    let allServicesOfUser = await Service.find({ userIdList: userId }).exec()
 
     let messageToSend = ``
     for (let i = 0; i < allServicesOfUser.length; i++) {
         messageToSend += `${i + 1}. ${allServicesOfUser[i].url} \n`
     }
+    if (messageToSend.length == 0) {
+        await ctx.reply(`You have not added any services currently, why don't you try /help and see what the bot can do for you?`)
+        return
+    }
 
     await ctx.reply(messageToSend)
+})
+
+bot.catch(async (err) => {
+    console.log(`random error: ${err}`)
+    let ctx = err.ctx
+    await ctx.reply(`We messed up this time!`)
 })
 
 bot.start()
@@ -155,17 +202,32 @@ async function alertM(service) {
     .then(async (res) => {
         let status = 'up'
         if (service.currentStatus != status) {   
-            let updateIfExists =  await Service.findOneAndUpdate({ userId: service.userId, url: service.url }, { currentStatus: status })
-            await bot.api.sendMessage(service.userId, `Your service ${service.url} is now ${status}`)
+            let updateIfExists =  await Service.findOneAndUpdate({ userId: service.userId, url: service.url }, 
+                { currentStatus: status, $push : { eventList: { status: status, time: new Date(Date.now()) } } })
+            await sendMessagesBulk(service.userIdList, `Your service ${service.url} is now ${status}`)
         }
     })
     .catch(async (err) => {
         let status = 'down'
         if (service.currentStatus != status) {
-            let updateIfExists =  await Service.findOneAndUpdate({ userId: service.userId, url: service.url }, { currentStatus: status })
-            await bot.api.sendMessage(service.userId, `Your service ${service.url} is now ${status}`)
+            let updateIfExists =  await Service.findOneAndUpdate({ userId: service.userId, url: service.url }, 
+                { currentStatus: status, $push : { eventList: { status: status, time: new Date(Date.now()) } } })
+            await sendMessagesBulk(service.userIdList, `Your service ${service.url} is now ${status}`)
         }
     })
+}
+
+
+async function sendMessagesBulk(userIdList, message) {
+    try {
+        let sendMessagePromiseList = []
+        for (let userId of userIdList) {
+            sendMessagePromiseList.push(bot.api.sendMessage(userId, message))
+        }
+        await Promise.all(sendMessagePromiseList)
+    } catch (err) {
+        console.log(`could not send message, reason: ${err}`)
+    }
 }
 
 cron.schedule('*/10 * * * * *', async () => {
